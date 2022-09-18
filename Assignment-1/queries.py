@@ -66,7 +66,8 @@ order by Id asc;
 ### Order by: Id increasing
 queries[5] = """
 select users.Id, DisplayName, Name, Reputation
-from users left outer join badges on (users.Id = badges.userId)
+from users left outer join badges 
+on (users.Id = badges.userId)
 where Reputation >= 10000 
 and Reputation <= 11000
 order by users.Id asc;
@@ -82,7 +83,7 @@ queries[6] = """
 select Id, Title, ViewCount
 from posts
 where (lower(Title) like '%postgres%' and ViewCount >= 50000)
-or (lower(Title) like '%mongodb%' and ViewCount <= 25000)
+or (lower(Title) like '%mongodb%' and ViewCount >= 25000)
 order by Id asc;
 """
 
@@ -90,7 +91,8 @@ order by Id asc;
 ### Output columns: Num_Comments
 queries[7] = """
 select count(*) as Num_Comments
-from comments left outer join users on (users.Id = comments.userId)
+from comments left outer join users 
+on (users.Id = comments.userId)
 where users.DisplayName = 'JHFB';
 """
 
@@ -163,7 +165,8 @@ order by users.Id asc;
 ### Order by: Id ascending
 queries[12] = """
 select posts.Id, Title, comments.Text
-from posts left outer join comments on (posts.Id = comments.PostId)
+from posts left outer join comments 
+on (posts.Id = comments.PostId)
 where posts.PostTypeId = 6
 and comments.score >= 10
 order by posts.Id asc;
@@ -198,12 +201,12 @@ limit 20;
 ### Output Columns: Id, Num_Comments
 ### Order by: Id ascending
 queries[14] = """
-select posts.Id, count(*) as Num_Comments
-from posts left outer join comments on (posts.Id = comments.PostId)
+select posts.Id, count(comments.postId) as Num_Comments
+from posts left outer join comments
+on (posts.Id = comments.PostId)
 group by posts.Id
 order by posts.Id asc;
 """
-
 
 ### 15. Generate a list - (Reputation, Num_Users) - containing the number
 ### of users with reputation between 1 and 100 (inclusive). If a particular reputation
@@ -226,7 +229,6 @@ group by gen.rep
 order by gen.rep asc;
 """
 
-
 ### 16. Generalizing #14 above, associate posts with both the number of
 ### comments and the number of votes
 ### 
@@ -236,7 +238,17 @@ order by gen.rep asc;
 ### Output Columns: Id, Num_Comments, Num_Votes
 ### Order by: Id ascending
 queries[16] = """
-select 0;
+with temp as (
+        select posts.Id, count(comments.postId) as Num_Comments
+        from posts left outer join comments
+        on (posts.Id = comments.PostId)
+        group by posts.Id
+        order by posts.Id asc)
+select temp.*, count(votes.PostId) as Num_Votes
+from temp left outer join votes
+on (temp.Id = votes.PostId) 
+group by temp.Id, temp.Num_Comments
+order by temp.Id asc;
 """
 
 ### 17. Write a query to find the posts with at least 7 children (i.e., at
@@ -245,7 +257,17 @@ select 0;
 ### Output columns: Id, Title
 ### Order by: Id ascending
 queries[17] = """
-select 0;
+with temp as (
+        select p.Id, p.Title, count(c.ParentId) as num_posts
+        from posts c
+        inner join posts p
+        on p.Id = c.ParentId
+        group by p.Id, p.Title
+        order by p.Id asc)
+select temp.Id, temp.Title
+from temp
+where temp.num_posts >= 7
+order by temp.Id asc;
 """
 
 ### 18. Find posts such that, between the post and its children (i.e., answers
@@ -256,7 +278,25 @@ select 0;
 ### Output columns: Id, Title
 ### Order by: Id ascending
 queries[18] = """
-select 0;
+with temp as (
+        select posts.Id, Title, count(votes.postId) as total_votes, parentId
+        from posts left outer join votes
+        on (posts.Id = votes.PostId)
+        group by posts.Id, posts.Title
+        order by posts.Id),
+temp2 as (
+        select p.Id, p.Title, sum(c.total_votes) as child_votes
+        from temp c
+        inner join temp p
+        on p.Id = c.ParentId
+        group by p.Id, p.Title
+        order by p.Id asc)
+select temp2.Id, temp2.Title
+from temp left outer join temp2
+on (temp.Id = temp2.Id)
+group by temp2.Id, temp2.Title
+having sum(temp.total_votes + temp2.child_votes) >= 100
+order by temp2.Id asc;
 """
 
 ### 19. Write a query to find posts where the post and the accepted answer
@@ -268,7 +308,31 @@ select 0;
 ### Output columns: Id, Title
 ### Order by: Id Ascending
 queries[19] = """
-select 0;
+with temp as (
+        select Id, Title, OwnerUserId as OGUserId, AcceptedAnswerId
+        from posts
+        where AcceptedAnswerId is not NULL),
+temp2 as (
+        select temp.Id, temp.OGUserId, posts.OwnerUserId as AAUserId, temp.Title
+        from temp left outer join posts
+        on temp.AcceptedAnswerId = posts.Id
+        order by temp.Id asc),
+temp3 as (
+        select Id, Title, OGUserId
+        from temp2
+        where OGUserId = AAUserId
+        order by Id asc)
+select temp3.Id, temp3.Title
+from temp3
+inner join (
+        select users.Id
+        from users left join posts
+        on (users.Id = posts.OwnerUserId)
+        group by users.Id
+        having count(posts.Id) = 2
+        order by users.Id asc) as temp4
+on temp3.OGUserId = temp4.Id
+order by temp3.Id asc;
 """
 
 ### 20. Write a query to generate a table: 
@@ -283,5 +347,19 @@ select 0;
 ### Output column order: VoteTypeDescription, Day_of_Week, Num_Votes
 ### Order by VoteTypeDescription asc, Day_of_Week asc
 queries[20] = """
-select 0;
+with temp as (
+        select VoteTypeId, extract(dow from CreationDate) as DayOfWeek, count(VoteTypeId) as VotesPerDay
+        from votes 
+        group by VoteTypeId, CreationDate 
+        order by CreationDate asc),
+temp2 as (
+        select VoteTypeId, sum(VotesPerDay) as NumVotes, DayOfWeek
+        from temp
+        group by VoteTypeId, DayOfWeek
+        order by VoteTypeId asc, DayOfWeek asc)
+select Description as VoteTypeDescription, DayOfWeek, NumVotes
+from temp2
+left outer join votetypes
+on (temp2.VoteTypeId = votetypes.VoteTypeId)
+order by VoteTypeDescription asc, DayOfWeek asc;
 """
