@@ -24,7 +24,10 @@ order by Id asc;
 ### See: https://www.postgresql.org/docs/current/datatype-enum.html if you are
 ### unsure how to use the enum type
 queries[1] = """
-select 0;
+alter table PostsCopy 
+    add column Age integer, 
+    add column OwnerDisplayName varchar(40), 
+    add column Popularity PopularityScale;
 """
 
 ### 2 [0.5]. Write a single query/statement to set the values of the new columns. 
@@ -42,13 +45,20 @@ select 0;
 ### https://www.postgresql.org/docs/current/sql-update.html has examples at the
 ### bottom to show how to update multiple columns in the same query
 queries[2] = """
-select 0;
+update PostsCopy
+set Age = date_part('year', age('2022-09-01', CreationDate)),
+    Popularity = case 
+                    when (ViewCount >= 20000) then 'High'::popularityscale
+                    when (ViewCount > 10000 and ViewCount < 20000) then 'Medium'::popularityscale
+                    when (ViewCount < 10000) then 'Low'::popularityscale
+                 end,
+    OwnerDisplayName = (select DisplayName from Users where OwnerUserId = Users.Id);
 """
-
 
 ### 3 [0.25]. Write a query "delete" all Posts from PostsCopy where tags is null.
 queries[3] = """
-select 0;
+delete from PostsCopy
+    where tags is NULL;
 """
 
 ### 4 [0.5]. Use "generate_series" to write a single statement to insert 10 new tuples
@@ -66,7 +76,9 @@ select 0;
 ### 
 ### Use `select * from postscopy where id > 100000;` to confirm.
 queries[4] = """
-select 0;
+insert into PostsCopy(Id, PostTypeId, Title, CreationDate, Score, OwnerUserId, LastEditorUserId)
+    select 100000 + n, 1, 'Post' || (100000 + n)::text, ('2022-09-30'::date + n) as dates, 0, -1, -1
+    from generate_series(1, 10) as g(n);
 """
 
 ### 5 [0.25]. Write a single query to rank the "Posts" by the number of votes, with the Post 
@@ -84,9 +96,18 @@ select 0;
 ### Output Columns: PostID, Rank
 ### Order by: Rank ascending, PostID ascending
 queries[5] = """
-select 0;
+with temp as (
+    select posts.Id, count(votes.PostId) as NumVotes
+    from posts left join votes
+    on posts.Id = votes.postId
+    group by posts.Id
+    order by posts.Id asc)
+select Id, rank () over (
+    order by NumVotes desc
+) Rank
+    from temp
+    order by Rank asc, Id asc;
 """
-
 
 ### 6 [0.25]. Write a statement to create a new View with the signature:
 ### UsersSummary(Id, NumOwnerPosts, NumLastEditorPosts, NumBadges)
@@ -107,7 +128,18 @@ select 0;
 ### Ensure that the latter is case (i.e., the query for a single ID runs quickly).
 ###
 queries[6] = """
-select 0;
+create or replace view UsersSummary as
+    select users.Id, 
+       (select count(*)
+       from posts
+       where posts.OwnerUserId = users.Id) as NumOwnerPosts,
+       (select count(*)
+       from posts
+       where posts.LastEditorUserId = users.Id) as NumLastEditorPosts,
+       (select count(*)
+       from badges
+       where badges.UserId = users.Id) as NumBadges
+    from users;
 """
 
 ### 7 [0.5]. Use window functions to construct a query to associate with each user
@@ -140,11 +172,11 @@ select 0;
 ### 
 queries[7] = """
 with temp as (
-        select ID, displayName, extract(year from CreationDate) as JoinedYear, Views
-        from users
-        )
-select *
-from temp;
+    select ID, displayName, extract(year from CreationDate) as JoinedYear, Views
+    from users)
+select *, avg(Views) over (partition by JoinedYear)
+    from temp
+    order by JoinedYear asc, ID asc;
 """
 
 ### 8 [0.25]. Write a function that takes in the ID of a Post as input, and returns the
@@ -164,7 +196,12 @@ from temp;
 ### will be very slow given the number of posts.
 ###
 queries[8] = """
-select 0;
+create or replace function NumComments(in integer) returns bigint as $$
+    select count(comments.PostId)::bigint 
+        from posts left join comments
+        on posts.Id = comments.PostId
+        where posts.Id = $1
+$$ language sql;
 """
 
 ### 9 [0.5]. Write a function that takes in an Userid as input, and returns a JSON string with 
@@ -197,7 +234,44 @@ select 0;
 ### 
 ### Confirm that: 'select userbadges(10);' returns the result above.
 queries[9] = """
-    select 0;
+create or replace function UserBadges(in integer) returns varchar as $$
+declare
+    userRec record;
+    numBadges integer;
+    badgesList varchar;
+    badgesJSON varchar;
+begin
+    select users.Id, users.DisplayName
+    into userRec
+    from users
+    where users.Id = $1;
+
+    badgesJSON = format('{"userid": %s, "displayname": "%s", "badges": [', userRec.Id, userRec.DisplayName);
+    
+    select count(Badges.id) into numBadges
+    from badges left join users
+    on badges.UserId = users.Id
+    where users.Id = $1;
+
+    if numBadges > 0 then 
+        select 
+        string_agg(
+            format('{"name": "%s", "class": %s, "date": "%s"}', Name, Class, Date), 
+            ', '
+            order by Date asc, Name asc) 
+        into badgesList
+        from badges left join users
+        on badges.UserId = users.Id
+        where users.Id = $1;
+    else
+        badgesList = '';
+    end if;
+    
+    badgesJSON = badgesJSON || badgesList || ']}';    
+    return badgesJSON;
+end;
+$$
+language plpgsql;
 """
 
 ### 10/11 [0.5]. Create a new table using:
@@ -229,7 +303,43 @@ queries[9] = """
 ###
 ### The trigger should also be named: UpdateMostFavoritedOnInsert
 queries[10] = """
-select 0;
+create or replace function UpdateMostFavoritedOnInsert()
+    returns trigger
+    language plpgsql
+    as
+$$
+declare
+    rec record;
+    faveRec record;
+    numFaves integer;
+begin
+    if NEW.votetypeid = 5 then
+        select * 
+        into rec
+        from MostFavoritedPosts
+        where MostFavoritedPosts.Id = NEW.postId;
+
+        if not found then
+            select p.Id, p.Title, count(v.Id) as NumFavorites 
+            into faveRec
+            from posts p left join votes v
+            on (p.Id = v.PostId and v.VoteTypeId = 5)
+            where p.Id = NEW.PostId
+            group by p.Id, p.Title;
+
+            if faveRec.NumFavorites > 10 then
+                insert into MostFavoritedPosts values(faveRec.id, faveRec.Title, faveRec.NumFavorites);
+            end if;
+        else
+            update MostFavoritedPosts
+            set NumFavorites = NumFavorites + 1
+            where NEW.postId = MostFavoritedPosts.Id;
+        end if;
+    end if;
+
+    return NEW;
+end
+$$;  
 """
 ### CREATE OR REPLACE FUNCTION UpdateMostFavoritedOnInsert()
 ###  RETURNS TRIGGER
@@ -239,7 +349,10 @@ select 0;
 ###  $$;
 
 queries[11] = """
-select 0;
+create trigger UpdateMostFavoritedOnInsert
+    after insert on votes
+    for each row
+    execute procedure UpdateMostFavoritedOnInsert();
 """
 
 ### 12 [0.25]. The goal here is to write a query to count the number of posts for each
@@ -256,10 +369,15 @@ select 0;
 ### We have provided that part of the query already. 
 queries[12] = """
 with temp as (
-     select 0 as tag, 0 as postid
-) 
+    select Id, trim(leading '<' from tags) as tags
+    from (select Id, trim(trailing '>' from tags) as tags from posts) a
+),
+temp2 as (
+    select unnest(string_to_array(Tags, '><')) as Tag, Id as PostId
+    from temp
+)
 select tag, count(*) as NumPosts
-from temp
-group by tag
-order by tag;
+    from temp2
+    group by tag
+    order by tag;
 """
