@@ -1,9 +1,11 @@
-from flask import Flask
+import json
+from flask import Flask, jsonify
 from flask_restful import Api, Resource, reqparse
 from flask_cors import CORS
 import psycopg2
 
 app = Flask(__name__)
+app.config['JSON_SORT_KEYS'] = False
 api = Api(app)
 CORS(app)
 
@@ -33,8 +35,19 @@ class Dashboard(Resource):
     #
     # FORMAT: {"Top 100 Users by Reputation": [{"ID": "...", "DisplayName": "...", "Reputation": "...", "Rank": "..."}, {"ID": "...", "DisplayName": "...", "Reputation": "...", "Rank": "..."}, ]
     def get(self, name):
+        conn = psycopg2.connect("host=127.0.0.1 dbname=stackexchange user=root password=root")
+        cur = conn.cursor()
+
         if name == "top100users":
-            return "Not implemented yet", 404
+            rank = "select id, displayname, reputation, rank () over (order by reputation desc) rank from users order by rank asc limit 100"
+
+            cur.execute(rank)
+            ans = cur.fetchall()
+            data = []
+            for user in ans:
+                data.append({'ID': user[0], 'DisplayName': user[1], 'Reputation': user[2], 'Rank': user[3]})
+            
+            return jsonify({'Top 100 Users by Reputation': data})
         else:
             return "Unknown Dashboard Name", 404
 
@@ -48,13 +61,33 @@ class User(Resource):
         # Post Titles must be sorted in alphabetically increasing order
         # CreationDate should be of the format: "2007-02-04" (this is what Python str() will give you)
 
+        conn = psycopg2.connect("host=127.0.0.1 dbname=stackexchange user=root password=root")
+        cur = conn.cursor()
+
         # Add your code to check if the userid is already present in the database
-        exists_user = True
+        find = "select id from users where id = (%s)"
+        data = (userid, )
+        cur.execute(find, data)
+        ans = cur.fetchall()
+
+        if len(ans) == 0:
+            exists_user = False
+        else: 
+            exists_user = True
 
         if not exists_user:
+            cur.close()
             return "User not found", 404
         else:
-            ret = {"ID": "xyz", "DisplayName": "xyz", "CreationDate": "...", "Reputation": "...", "PostTitles": ["posttitle1", "posttitle1"]}
+            part1 = "select id, displayname, creationdate, reputation from users where id = (%s)"
+            part2 = "select title from posts where posts.owneruserid = (%s) and title is not null order by title asc"
+            cur.execute(part1, data)
+            user = cur.fetchone()
+            cur.execute(part2, data)
+            posts = cur.fetchall()
+            posts = list(sum(posts, ()))
+            ret = {"ID": user[0], "DisplayName": user[1], "CreationDate": str(user[2]), "Reputation": user[3], "PostTitles": posts}
+            cur.close()
             return ret, 200
 
     # Add a new user into the database, using the information that's part of the POST request
@@ -72,23 +105,73 @@ class User(Resource):
         print(args)
 
         # Add your code to check if the userid is already present in the database
-        exists_user = True
+        conn = psycopg2.connect("host=127.0.0.1 dbname=stackexchange user=root password=root")
+        cur = conn.cursor()
+        
+        find = "select id from users where id = (%s)"
+        data = (userid, )
+        cur.execute(find, data)
+        ans = cur.fetchall()
+
+        if len(ans) == 0:
+            exists_user = False
+        else: 
+            exists_user = True
 
         if exists_user:
             return "FAILURE -- Userid must be unique", 201
         else:
             # Add your code to insert the new tuple into the database
+            insert = "insert into users(id, reputation, creationdate, displayname, upvotes, downvotes, views) values (%s, %s, %s, %s, %s, %s, 0)"
+            data = (userid, args['reputation'], args['creationdate'], args['displayname'], args['upvotes'], args['downvotes'])
+            cur.execute(insert, data)
+            conn.commit()
             return "SUCCESS", 201
 
     # Delete the user with the specific user id from the database
     def delete(self, userid):
         # Add your code to check if the userid is present in the database
-        exists_user = False
+        conn = psycopg2.connect("host=127.0.0.1 dbname=stackexchange user=root password=root")
+        cur = conn.cursor()
+        
+        find = "select id from users where id = (%s)"
+        data = (userid, )
+        cur.execute(find, data)
+        ans = cur.fetchall()
+
+        if len(ans) == 0:
+            exists_user = False
+        else: 
+            exists_user = True
 
         if exists_user:
             # Add your code to delete the user from the user table
             # If there are corresponding entries in "badges" table for that userid, those should be deleted
             # For posts, comments, votes, set the appropriate userid fields to -1 (since that content should not be deleted)
+            
+            replace_post_owner = "update posts set owneruserid = -1 where owneruserid = (%s)"
+            cur.execute(replace_post_owner, data)
+            conn.commit()
+
+            replace_post_editor = "update posts set lasteditoruserid = -1 where lasteditoruserid = (%s)"
+            cur.execute(replace_post_editor, data)
+            conn.commit()
+
+            replace_comment = "update comments set userid = -1 where userid = (%s)"
+            cur.execute(replace_comment, data)
+            conn.commit()
+
+            replace_votes = "update votes set userid = -1 where userid = (%s)"
+            cur.execute(replace_votes, data)
+            conn.commit()
+            
+            remove_badges = "delete from badges where userid = (%s)"
+            cur.execute(remove_badges, data)
+            conn.commit()
+
+            delete_user = "delete from users where id = (%s)"
+            cur.execute(delete_user, data)
+            conn.commit()            
             return "SUCCESS", 201
         else:
             return "FAILURE -- Unknown Userid", 404
